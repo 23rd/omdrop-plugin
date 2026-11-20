@@ -118,6 +118,17 @@ core_version() {
   timeout -k 1 2 "$OMDROP_CORE" version </dev/null 2>/dev/null | sed -n 's/^omdrop-core \([^[:space:]]*\)$/\1/p' | head -n 1
 }
 OMDROP_CORE="${OMDROP_CORE:-/usr/lib/omdrop-core/omdrop}"
+T2_MODEL=
+if [[ "${OMDROP_IMPLEMENTATION:-}" != python || "${OMDROP_T2_INSTALL:-}" == 1 ]]; then
+  T2_MODEL="$(cat "${OMDROP_SYSFS:-/sys}/class/dmi/id/product_name" 2>/dev/null || true)"
+fi
+T2_INSTALLED=
+if [[ "$T2_MODEL" == MacBookPro15,1 && -x /usr/bin/t2drop &&
+      -f /usr/lib/NetworkManager/conf.d/90-t2-drop-awdl.conf ]]; then
+  T2_INSTALLED=1
+  CORE_MIN=0.1.18
+fi
+
 OMDROP_HOOKS="${OMDROP_HOOKS:-/usr/lib/omdrop/radio}"
 
 # The panel polls every ten seconds, so a window opened or a setting changed
@@ -145,7 +156,7 @@ case "${OMDROP_IMPLEMENTATION:-}" in
     if [[ "${1:-}" == install-core ]]; then
       :
     elif [[ -x "$OMDROP_CORE" && "$(readlink -f "$OMDROP_CORE")" != "$SELF" ]]; then
-      if [[ ! -x "$OMDROP_HOOKS/probe" ]]; then
+      if [[ ! -x "$OMDROP_HOOKS/probe" && -z "${OMDROP_T2_SENDER:-}$T2_INSTALLED" ]]; then
         CORE_NO_HOOKS=1
         if [[ -n "${OMDROP_IMPLEMENTATION:-}" ]]; then
           printf 'omdrop: OMDROP_IMPLEMENTATION=rust, but the radio backend installs no omdrop-core hooks in %s.\n' "$OMDROP_HOOKS" >&2
@@ -1141,6 +1152,12 @@ radio_update() {
 }
 
 prereqs_missing() {
+  if [[ "$T2_MODEL" == MacBookPro15,1 && "$(broadcom_wifi_device)" == 0x4464 ]]; then
+    if [[ -z "$T2_INSTALLED" || ! -x /usr/lib/omdrop-core/t2drop-receive ]]; then
+      printf 'driver\t%s\n' "Install the KaiT2en backend and Omdrop core for this MacBookPro15,1."
+    fi
+    return 0
+  fi
   if radio_probe; then
     # A backend that does not answer is alone too: install-driver refuses to
     # run for it, so a library item would offer the panel's button for nothing.
@@ -1234,7 +1251,12 @@ ufw_active() {
 }
 
 cmd_firewall() {
-  local action=${1:-}
+  local action=${1:-} port=8771
+  local -a rule=("${UFW_RULE[@]}")
+  if [[ -n "$T2_INSTALLED" ]]; then
+    port=8770
+    rule[9]=$port
+  fi
   case "$action" in
     install)
       if ! command -v ufw >/dev/null 2>&1; then
@@ -1245,15 +1267,15 @@ cmd_firewall() {
         echo "UFW is not active; Omdrop did not change its configuration."
         return 0
       fi
-      echo "Allowing AirDrop receiver traffic only on awdl0, from IPv6 link-local peers, to TCP 8771."
-      sudo ufw "${UFW_RULE[@]}"
+      echo "Allowing AirDrop receiver traffic only on awdl0, from IPv6 link-local peers, to TCP $port."
+      sudo ufw "${rule[@]}"
       ;;
     remove)
       if ! command -v ufw >/dev/null 2>&1; then
         echo "UFW is not installed; there is no Omdrop UFW rule to remove."
         return 0
       fi
-      sudo ufw --force delete "${UFW_RULE[@]}"
+      sudo ufw --force delete "${rule[@]}"
       ;;
     *)
       die "usage: omdrop firewall install|remove"
@@ -1448,6 +1470,7 @@ core_backend_ok() {
   esac
 }
 core_supported() {
+  if [[ -n "$T2_INSTALLED" ]]; then return 0; fi
   if radio_probe; then
     core_backend_ok && [[ "$(probe_field hardware)" != false ]]
   else
@@ -1523,7 +1546,9 @@ cmd_install_core() {
     && die "omdrop-core comes with the $OMDROP_PKG package, which updates it with the rest of the system (omarchy update)."
   want=$(core_wanted) \
     || die "This copy of the plugin has no core/ to build omdrop-core from."
-  if radio_probe; then
+  if [[ -n "$T2_INSTALLED" ]]; then
+    :
+  elif radio_probe; then
     radio_probe_hung && die "$(radio_probe_hung_say)"
     if [[ "$(probe_field backend)" == owl ]]; then
       [[ -x "$OMDROP_HOOKS/probe" ]] \
@@ -1573,6 +1598,10 @@ BUILDDIR=$cache_q/build PKGDEST=$cache_q makepkg --dir $core_q --syncdeps --inst
 echo
 echo 'omdrop-core is installed, and omdrop now runs it. OMDROP_IMPLEMENTATION=python runs the Python version instead.'"
   local intro="omdrop-core is installed as a system package, which requires administrative privilege. You will be prompted for your password."
+  if [[ "${OMDROP_INSTALL_INLINE:-}" == 1 ]]; then
+    bash -c "$build"
+    return
+  fi
   if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
     echo "$intro"
     echo

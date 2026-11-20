@@ -23,6 +23,7 @@ mod pick;
 mod proc;
 mod send;
 mod status;
+mod t2;
 mod window;
 
 use std::ffi::OsString;
@@ -161,6 +162,9 @@ fn main() {
     // someone who has used systemctl reaches for start/stop, and someone who
     // has used a peer tool reaches for list.
     let code = match cmd.as_str() {
+        "on" | "start" | "off" | "stop" | "toggle" if t2::sender().is_some() => {
+            t2::receive_window(&cmd, &s)
+        }
         "on" | "start" => window::cmd_on(&s),
         "off" | "stop" => window::cmd_off(&s),
         "toggle" => window::cmd_toggle(&s),
@@ -171,6 +175,17 @@ fn main() {
         "dir" => status::cmd_dir(&s),
         "sound" => status::cmd_sound(&s),
         "limit" => status::cmd_limit(&s),
+        "visibility" | "vis" | "viz" if t2::sender().is_some() => match s.as_slice() {
+            [] => {
+                outln!("everyone");
+                0
+            }
+            [mode] if mode == "everyone" => 0,
+            _ => {
+                errln!("KaiT2en receiving currently supports Everyone mode.");
+                1
+            }
+        },
         "visibility" | "vis" | "viz" => status::cmd_visibility(&s),
         "senders" => status::cmd_senders(&s),
         "identity" => identity::cmd_identity(&s),

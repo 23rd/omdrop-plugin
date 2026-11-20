@@ -98,3 +98,24 @@ cd fuzz && cargo +nightly fuzz run cpio_extract -- -max_total_time=300
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+## Intel T2 Macs with KaiT2en
+
+This provider targets MacBookPro15,1. It needs an AWDL-capable `linux-t2`
+kernel, the BCM4364 firmware, the `t2drop` package and BlueZ. Use the
+existing Omdrop panel to send or open a receiving window. Receiving works
+in Everyone mode. A file goes through Omdrop's usual arrival handler after
+it has been saved.
+
+`omdrop install-driver` offers the distro's `t2drop` package and installs
+core and its Python D-Bus dependencies. If UFW is active, Omdrop adds a rule
+limited to IPv6 link-local traffic on `awdl0`, TCP 8770. Remove that rule
+with `omdrop firewall remove` before removing `t2drop`. The same command
+uses TCP 8771 for Omdrop's own receiver on other backends.
+
+KaiT2en owns AWDL and the receiving socket. Omdrop holds a D-Bus browse
+connection while displaying the peer list and while the file chooser is
+open. The sender has its own lease until it exits. It uses core's existing
+AirDrop uploader and BLE advertiser as child processes so the normal
+Omdrop cancellation path still applies. Closing the receiving window
+unregisters the one receiver agent with KaiT2en.

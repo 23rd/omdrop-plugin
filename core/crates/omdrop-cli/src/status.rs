@@ -164,6 +164,10 @@ pub fn radio_status() -> Option<Radio> {
 #[derive(Serialize)]
 struct StatusJson {
     receiving: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    send_only: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    kait2en: bool,
     /// null when the radio half is not installed: we genuinely do not know,
     /// and the panel must not draw that as "yes".
     visible: Option<bool>,
@@ -182,9 +186,22 @@ struct StatusJson {
 
 pub fn cmd_status(args: &[String]) -> i32 {
     let json = args.first().is_some_and(|a| a == "--json");
-    let on = receiving();
+    let kait2en = crate::t2::sender().is_some();
+    let send_only = kait2en && crate::t2::receiver().is_none();
+    let t2_window = if kait2en && !send_only {
+        crate::t2::receive_status()
+    } else {
+        None
+    };
+    let on = if kait2en {
+        t2_window.is_some()
+    } else {
+        receiving()
+    };
     let mut mode = "off";
-    if on {
+    if let Some((t2_mode, _)) = t2_window {
+        mode = t2_mode;
+    } else if on {
         // The watcher answers for every window it started. Without one -- it
         // was killed, or the receiver was started by hand -- the timer is all there is.
         mode = watch_mode().unwrap_or_else(|| {
@@ -199,14 +216,24 @@ pub fn cmd_status(args: &[String]) -> i32 {
             }
         });
     }
-    let left = window_remaining();
-    let radio = radio_status();
+    let left = if kait2en {
+        t2_window.and_then(|(_, remaining)| remaining)
+    } else {
+        window_remaining()
+    };
+    let radio = if kait2en { None } else { radio_status() };
 
     if json {
         let name = effective_name();
         let st = StatusJson {
             receiving: on,
-            visible: radio.as_ref().map(|r| r.visible),
+            send_only,
+            kait2en,
+            visible: if kait2en && !send_only {
+                Some(on)
+            } else {
+                radio.as_ref().map(|r| r.visible)
+            },
             remaining: left,
             name: (!name.is_empty()).then_some(name),
             dir: effective_dir(),
@@ -217,13 +244,25 @@ pub fn cmd_status(args: &[String]) -> i32 {
                 .filter(|r| !r.is_empty()),
             rx_proven: radio.as_ref().is_some_and(|r| r.rx_proven),
             sound: sound_on(),
-            visibility: visibility().to_string(),
+            visibility: if kait2en { "everyone" } else { visibility() }.to_string(),
             senders: sender_count(),
         };
         outln!("{}", py_json(&st));
         return 0;
     }
 
+    if send_only {
+        outln!("KaiT2en sending is enabled. Use t2drop receive for incoming files.");
+        return 0;
+    }
+    if kait2en && on {
+        outln!(
+            "Receiving AirDrop files as {} in {}",
+            effective_name(),
+            effective_dir()
+        );
+        return 0;
+    }
     if !on {
         outln!("Not receiving");
         return 0;
@@ -600,6 +639,10 @@ pub fn cmd_dir(args: &[String]) -> i32 {
     let old = cfg_get("download_dir");
     if !cfg_set("download_dir", &new_s) {
         die(format!("could not write {}", ctx().config.display()));
+    }
+    if crate::t2::sender().is_some() {
+        outln!("The next AirDrop receiving window will save files in {new_s}");
+        return 0;
     }
     let dropin = ctx()
         .config_home

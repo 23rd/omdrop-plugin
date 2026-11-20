@@ -159,6 +159,7 @@ fn require_sender() {
 
 pub fn cmd_send(args: &[OsString]) -> i32 {
     let c = ctx();
+    let t2_sender = crate::t2::sender();
     let mut to = String::new();
     let mut wait = DEFAULT_SEND_WAIT.to_string();
     let (mut verbose, mut pick) = (false, false);
@@ -234,7 +235,11 @@ pub fn cmd_send(args: &[OsString]) -> i32 {
         if !rest.is_empty() {
             die("send --pick: the chooser picks the files, so name only the recipient, with --to");
         }
-        require_sender();
+        if let Some(sender) = &t2_sender {
+            crate::t2::check_sender(sender, &to);
+        } else {
+            require_sender();
+        }
         let title = format!(
             "Send to {}",
             if to.is_empty() {
@@ -265,7 +270,7 @@ pub fn cmd_send(args: &[OsString]) -> i32 {
     let mut kept = Vec::new();
     let mut notes = Vec::new();
     for f in files {
-        match crate::links::is_link_file(&f)
+        match (t2_sender.is_none() && crate::links::is_link_file(&f))
             .then(|| crate::links::link_target(Path::new(&f)))
             .flatten()
         {
@@ -327,6 +332,12 @@ pub fn cmd_send(args: &[OsString]) -> i32 {
     // folding the case here would only corrupt the message it prints back.
     if to.contains('\n') {
         die("send: a recipient is one name or address, not several lines");
+    }
+    if let Some(sender) = &t2_sender {
+        if !urls.is_empty() {
+            die("KaiT2en sending supports files. Choose a file to send.");
+        }
+        return crate::t2::send(sender, &to, &wait, &files, verbose);
     }
     if !is_executable(&c.sender) {
         die(format!(
@@ -953,10 +964,10 @@ fn run_bounded(
 }
 
 #[derive(Serialize)]
-struct PeerJson<'a> {
-    mac: &'a str,
-    rssi: Option<i64>,
-    name: Option<&'a str>,
+pub(crate) struct PeerJson<'a> {
+    pub(crate) mac: &'a str,
+    pub(crate) rssi: Option<i64>,
+    pub(crate) name: Option<&'a str>,
 }
 
 /// The listing as JSON for the panel. The placeholders a lookup prints for
@@ -982,6 +993,9 @@ pub fn peers_json(listing: &str) -> String {
 }
 
 pub fn cmd_peers(args: &[String]) -> i32 {
+    if crate::t2::sender().is_some() {
+        return crate::t2::peers(args);
+    }
     // -n is opt-in because asking a peer its name means connecting to it,
     // which shows this machine to every device listed, and raises a BLE
     // advert with this account's contact hashes so a Contacts Only device

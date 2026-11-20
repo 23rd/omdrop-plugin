@@ -119,7 +119,7 @@ fn sysfs() -> PathBuf {
 
 /// The device ID of the first Broadcom (vendor 0x14e4) network controller
 /// on PCI, empty when it cannot be read.
-fn broadcom_wifi_device() -> Option<String> {
+pub(crate) fn broadcom_wifi_device() -> Option<String> {
     let entries = std::fs::read_dir(sysfs().join("bus/pci/devices")).ok()?;
     entries.flatten().find_map(|e| {
         let read = |n: &str| crate::util::read_trimmed(&e.path().join(n)).unwrap_or_default();
@@ -630,6 +630,14 @@ pub fn cmd_install_core() -> i32 {
     let err = Command::new(&script)
         .arg("install-core")
         .env("OMDROP_IMPLEMENTATION", "python")
+        .env(
+            "OMDROP_T2_INSTALL",
+            if crate::t2::sender().is_some() {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .exec();
     die(format!("could not run {}: {err}", script.display()))
 }
@@ -698,6 +706,23 @@ fn backend_hardware_missing() -> Vec<(String, String)> {
 /// each: the id is for the panel, which offers to fix the one thing it
 /// can, and the sentence is for someone holding a laptop.
 pub fn prereqs_missing() -> Vec<(String, String)> {
+    if crate::t2::sender().is_some() {
+        if crate::t2::receiver().is_none() {
+            return vec![(
+                "driver".into(),
+                "Install the KaiT2en receiving adapter.".into(),
+            )];
+        }
+        let missing = run_quiet("python3", &["-c", "import dbus, gi.repository"]) != 0;
+        return if missing {
+            vec![(
+                "library".into(),
+                "Install python-dbus and python-gobject for KaiT2en.".into(),
+            )]
+        } else {
+            Vec::new()
+        };
+    }
     let mut missing = Vec::new();
     match radio_probe() {
         // A backend that does not answer is alone: install-driver refuses to
@@ -829,6 +854,10 @@ fn ufw_active() -> bool {
 /// other AWDL applications can use, and opening an application port belongs
 /// to the application.
 pub fn cmd_firewall(args: &[String]) -> i32 {
+    let mut rule = UFW_RULE;
+    if crate::t2::sender().is_some() {
+        rule[9] = "8770";
+    }
     match args.first().map(String::as_str).unwrap_or("") {
         "install" => {
             if !have("ufw") {
@@ -840,10 +869,11 @@ pub fn cmd_firewall(args: &[String]) -> i32 {
                 return 0;
             }
             outln!(
-                "Allowing AirDrop receiver traffic only on awdl0, from IPv6 link-local peers, to TCP 8771."
+                "Allowing AirDrop receiver traffic only on awdl0, from IPv6 link-local peers, to TCP {}.",
+                rule[9]
             );
             let mut a = vec!["ufw"];
-            a.extend(UFW_RULE);
+            a.extend(rule);
             run("sudo", &a)
         }
         "remove" => {
@@ -852,7 +882,7 @@ pub fn cmd_firewall(args: &[String]) -> i32 {
                 return 0;
             }
             let mut a = vec!["ufw", "--force", "delete"];
-            a.extend(UFW_RULE);
+            a.extend(rule);
             run("sudo", &a)
         }
         _ => die("usage: omdrop firewall install|remove"),
@@ -908,6 +938,19 @@ pub fn build_script(
 /// script out of a plugin clone, which would be root running user-writable code.
 pub fn cmd_install_driver() -> i32 {
     let c = ctx();
+    if crate::t2::sender().is_some() {
+        let Some(plugin) = c.plugin_dir() else {
+            die("Omdrop could not find its plugin to install the KaiT2en prerequisites.");
+        };
+        let mut command = Command::new(plugin.join("bin/omdrop"));
+        command
+            .env("OMDROP_IMPLEMENTATION", "python")
+            .env("OMDROP_T2_INSTALL", "1")
+            .arg("install-driver");
+        return command
+            .status()
+            .map_or(1, |status| status.code().unwrap_or(1));
+    }
     let self_q = shell_quote(&c.command_path().to_string_lossy());
     if foreign_backend() {
         return install_for_backend(&self_q);

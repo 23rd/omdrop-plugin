@@ -169,7 +169,10 @@ Panel {
   // The CLI answering is not the same as this machine being able to receive.
   // `visible: null` means the radio half is missing, which is the state the
   // struck-through icon and the "Not available" copy are for.
-  readonly property bool usable: installed && visibility !== -1
+  property bool sendOnly: false
+  property bool kait2en: false
+  readonly property bool usable: installed && !sendOnly && visibility !== -1
+  readonly property bool canSend: usable || (installed && sendOnly)
 
   // The receiver comes up in a moment and the radio gate takes about 10 s
   // after that, so there is a short stretch where the window is genuinely
@@ -253,6 +256,7 @@ Panel {
   // The one exception stays a headline: a window that is open while nothing
   // can see us is a fault, not a nuance, and must not read as "on".
   readonly property string stateText: {
+    if (sendOnly) return "AirDrop with KaiT2en"
     if (!usable) return "Not available"
     if (busy) return (turningOn ? "Turning on" : "Turning off") + busyDots
     if (settling) return "Waking the radio" + busyDots
@@ -278,6 +282,7 @@ Panel {
   readonly property bool detailUrgent: detailText === visibleText && audience === "contacts" && senders === 0
 
   readonly property string detailText: {
+    if (sendOnly) return "Open AirDrop on the device you want to send to."
     if (!usable) return doctorText !== "" ? doctorText
                                           : "Needs the AWDL radio support this plugin's README describes."
     if (settling) return "The radio takes a few seconds to come up."
@@ -481,9 +486,18 @@ Panel {
     return p.name === "" && (unanswered[p.mac] || 0) < namesTries
   }))
   property var flashedMacs: ({})    // rows that have had their arrival flash
-  readonly property bool scanning: radarOpen && root.opened && receiving && visibility === 1
+  // The file chooser temporarily closes the panel. Keep the KaiT2en
+  // browse lease until the chooser answers, so a selected address stays live.
+  readonly property bool scanning: radarOpen
+    && (root.opened || (kait2en && sendProc.running && !sendChosen))
+    && (kait2en || (receiving && visibility === 1))
+  property string discoveryError: ""
   // The line under the heading. Empty once there is a list to look at.
   readonly property string radarStatus: {
+    if (kait2en) {
+      if (discoveryError !== "") return discoveryError
+      return peers.length === 0 ? "Searching for peers" : ""
+    }
     if (!receiving) return "Turning Omdrop on"
     if (!scanning) return "Waiting for the radio"
     if (peers.length === 0) return "Searching for peers"
@@ -577,7 +591,7 @@ Panel {
     radarOpen = !radarOpen
     // Scanning is what a window does, so opening the radar on a machine that
     // is off opens one, for as long as the slider says.
-    if (radarOpen && usable && !receiving && !busy) toggleOmdrop()
+    if (radarOpen && usable && !kait2en && !receiving && !busy) toggleOmdrop()
   }
 
   Process {
@@ -587,6 +601,32 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         try { root.mergePeers(JSON.parse(text)) } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: t2PeersProc
+    command: [root.cli, "peers", "--json", "--watch"]
+    property bool stopping: false
+    stdout: SplitParser {
+      onRead: function(line) {
+        if (t2PeersProc.stopping || !root.scanning) return
+        try { root.mergePeers(JSON.parse(line)) } catch (e) {}
+      }
+    }
+    stderr: SplitParser {
+      onRead: function(line) {
+        if (!t2PeersProc.stopping && root.scanning) root.discoveryError = line.trim()
+      }
+    }
+    onExited: function(code) {
+      if (stopping) {
+        stopping = false
+        if (root.scanning && root.kait2en) running = true
+      } else if (root.scanning && code !== 0) {
+        root.mergePeers([])
+        if (root.discoveryError === "") root.discoveryError = "AirDrop discovery stopped"
       }
     }
   }
@@ -654,7 +694,7 @@ Panel {
   Timer {
     interval: 2000
     repeat: true
-    running: root.scanning
+    running: root.scanning && !root.kait2en
     triggeredOnStart: true
     onTriggered: if (!peersProc.running) peersProc.running = true
   }
@@ -723,7 +763,7 @@ Panel {
   // A device with a name still to find starts a lookup now, unless the last
   // one failed at once and is waiting out its guard.
   onNamesWantedChanged: {
-    if (!namesWanted || !scanning || namesProc.running) return
+    if (kait2en || !namesWanted || !scanning || namesProc.running) return
     if (namesAgain.running && namesAgain.interval === namesGuardMs) return
     lookUpNames(namesRetryMs)
   }
@@ -731,6 +771,19 @@ Panel {
   // A radar that has been closed should not keep broadcasting. One that opens
   // again gives every silent device its tries again.
   onScanningChanged: {
+    if (kait2en) {
+      if (scanning) {
+        discoveryError = ""
+        if (!t2PeersProc.running) t2PeersProc.running = true
+      } else {
+        if (t2PeersProc.running) {
+          t2PeersProc.stopping = true
+          t2PeersProc.signal(15)
+        }
+        mergePeers([])
+      }
+      return
+    }
     if (scanning) {
       unanswered = ({})
       fruitless = 0
@@ -950,6 +1003,8 @@ Panel {
   function applyStatus(text) {
     try {
       var s = JSON.parse(text)
+      sendOnly = s.send_only === true
+      kait2en = s.kait2en === true || sendOnly
       installed = true
       receiving = !!s.receiving
       visibility = (s.visible === null || s.visible === undefined) ? -1 : (s.visible ? 1 : 0)
@@ -963,8 +1018,8 @@ Panel {
       senders = s.senders || 0
       if (!nameField.activeFocus) nameField.text = shownName
       // Asked once per transition into unusable, not on every poll.
-      if (!usable && doctorText === "" && !doctorProc.running) doctorProc.running = true
-      if (usable) { doctorText = ""; driverInstallable = false }
+      if (!canSend && doctorText === "" && !doctorProc.running) doctorProc.running = true
+      if (canSend) { doctorText = ""; driverInstallable = false }
     } catch (e) {
       installed = false
     }
@@ -1042,7 +1097,7 @@ Panel {
           anchors.centerIn: parent
           iconSize: Style.space(12)
           color: root.barIconColor
-          crossed: !root.usable
+          crossed: !root.canSend
           drifting: root.busy || root.settling
         }
       }
@@ -1092,7 +1147,7 @@ Panel {
             id: heroIcon
             iconSize: Style.font.display
             color: root.busy || root.receiving ? root.foreground : root.dim
-            crossed: !root.usable
+            crossed: !root.canSend
             drifting: root.busy || root.settling
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -1209,6 +1264,7 @@ Panel {
             width: parent.width
             bar: root.bar
             minimum: 0
+            enabled: !root.kait2en || !root.receiving
             maximum: root.windowStops.length - 1
             step: 1
             integer: true
@@ -1226,10 +1282,10 @@ Panel {
         // Who may send. Shown while Omdrop is off too, so the choice can be
         // made before a window opens rather than a few seconds into one. It is
         // saved, and applies to every window until changed.
-        PanelSeparator { visible: root.usable; foreground: root.foreground }
+        PanelSeparator { visible: root.usable && !root.kait2en; foreground: root.foreground }
 
         Item {
-          visible: root.usable
+          visible: root.usable && !root.kait2en
           width: parent.width
           implicitHeight: Math.max(audienceTabs.implicitHeight, sendersButton.implicitHeight)
 
@@ -1309,7 +1365,7 @@ Panel {
 
         // The known-senders list, opened from the button above.
         Column {
-          visible: root.usable && root.sendersOpen
+          visible: root.usable && !root.kait2en && root.sendersOpen
           width: parent.width
           spacing: Style.space(2)
 
@@ -1402,7 +1458,7 @@ Panel {
         // Sending. A header that opens downwards onto the radar, the
         // newest name it has learnt, and the devices that can be sent to.
         Item {
-          visible: root.usable
+          visible: root.canSend
           width: parent.width
           implicitHeight: nearbyHeader.implicitHeight + Style.space(4)
 
@@ -1449,7 +1505,7 @@ Panel {
 
         Item {
           id: radarDrawer
-          visible: root.usable && height > 0
+          visible: root.canSend && height > 0
           width: parent.width
           height: root.radarOpen ? radarColumn.implicitHeight : 0
           clip: true
@@ -1482,6 +1538,8 @@ Panel {
               Text {
                 id: statusWords
                 x: Math.max(0, Math.round((parent.width - implicitWidth - threeDots.advanceWidth) / 2))
+                width: Math.min(implicitWidth, parent.width)
+                elide: Text.ElideRight
                 textFormat: Text.PlainText
                 text: root.radarStatus
                 color: root.dim
@@ -1493,6 +1551,7 @@ Panel {
                 anchors.left: statusWords.right
                 anchors.baseline: statusWords.baseline
                 textFormat: Text.PlainText
+                visible: root.discoveryError === ""
                 text: root.radarDots
                 color: root.dim
                 font: statusWords.font
@@ -1547,6 +1606,7 @@ Panel {
 
           TextField {
             id: nameField
+            enabled: !root.kait2en || !root.receiving
             width: parent.width
             foreground: root.foreground
             text: root.shownName
@@ -1580,6 +1640,7 @@ Panel {
           // The folder, shown as a button that opens it in the chooser.
           Button {
             width: parent.width
+            enabled: !root.kait2en || !root.receiving
             leftAlign: true
             bordered: true
             foreground: root.foreground
@@ -1656,6 +1717,7 @@ Panel {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           visible: row.peer.name !== ""
+          textFormat: Text.PlainText
           text: row.peer.mac
           color: root.dim
           font.family: root.fontFamily
